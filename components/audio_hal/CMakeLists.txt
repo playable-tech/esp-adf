@@ -1,5 +1,6 @@
 set(COMPONENT_ADD_INCLUDEDIRS ./include
                             ./driver/es8388
+			    ./driver/es8388_skoog
                             ./driver/es8374
                             ./driver/es8311
                             ./driver/es7243
@@ -18,6 +19,8 @@ set(COMPONENT_PRIV_REQUIRES audio_sal audio_board mbedtls esp_peripherals displa
 set(COMPONENT_SRCS ./audio_hal.c
                     ./driver/es8388/es8388.c
                     ./driver/es8388/headphone_detect.c
+		    ./driver/es8388_skoog/es8388_skoog.c
+		    ./driver/es8388_skoog/headphone_detect_skoog.c
                     ./driver/es8374/es8374.c
                     ./driver/es8311/es8311.c
                     ./driver/es7243/es7243.c

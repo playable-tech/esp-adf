@@ -23,6 +23,11 @@ variables:
   ADF_PATH: "$CI_PROJECT_DIR"
   IDF_PATH: "$CI_PROJECT_DIR/esp-idf"
 
+.setup_tools_unless_target_test: &setup_tools_unless_target_test |
+  if [[ "$SETUP_TOOLS" == "1" || "$CI_JOB_STAGE" != "target_test" ]]; then
+  $IDF_PATH/tools/idf_tools.py --non-interactive install && eval "$($IDF_PATH/tools/idf_tools.py --non-interactive export)" || exit 1
+  fi
+
 before_script:
   # add gitlab ssh key
   - mkdir -p ~/.ssh
@@ -42,7 +47,6 @@ before_script:
 
   # fetch the submodules (& if necessary re-fetch repo) from gitlab
   - time ./esp-idf/tools/ci/get-full-sources.sh
-
 
 .add_gitlab_key_before:
   before_script: &add_gitlab_key_before
@@ -90,17 +94,133 @@ before_script:
     - mkdir -p ${LOG_PATH}
     - ${ADF_PATH}/tools/ci/build_examples.sh "${CI_JOB_NAME}"
 
-build_examples_00:
-  <<: *build_examples_template
+.build_examples_make: &build_examples_make
+  <<: *build_template
+  parallel: 8
+  # This is a workaround for a rarely encountered issue with building examples in CI.
+  # Probably related to building of Kconfig in 'make clean' stage
+  retry: 1
+  artifacts:
+    when: always
+    paths:
+      - build_examples/*/*/*/build/*.bin
+      - build_examples/*/*/*/sdkconfig
+      - build_examples/*/*/*/build/*.elf
+      - build_examples/*/*/*/build/*.map
+      - build_examples/*/*/*/build/download.config
+      - build_examples/*/*/*/build/bootloader/*.bin
+      - build_examples/*/*/*/*/build/partition_table/*.bin
+      - $LOG_PATH
+    expire_in: 4 days
+  variables:
+    IDF_CI_BUILD: "1"
+    LOG_PATH: "$CI_PROJECT_DIR/log_examples_make"
+  # This is IDF CI limits
+  # only:
+    # # Here both 'variables' and 'refs' conditions are given. They are combined with "AND" logic.
+    # variables:
+    #   - $BOT_TRIGGER_WITH_LABEL == null
+    #   - $BOT_LABEL_BUILD
+    #   - $BOT_LABEL_EXAMPLE_TEST
+    #   - $BOT_LABEL_REGULAR_TEST
+    #   - $BOT_LABEL_WEEKEND_TEST
+    # refs:
+    #   - master
+    #   - /^release\/v/
+    #   - /^v\d+\.\d+(\.\d+)?($|-)/
+    #   - triggers
+    #   - schedules
+    #   - pipelines
+    #   - web
+  script:
+    # it's not possible to build 100% out-of-tree and have the "artifacts"
+    # mechanism work, but this is the next best thing
+    - rm -rf build_examples
+    - mkdir build_examples
+    - cd build_examples
+    # build some of examples
+    - mkdir -p ${LOG_PATH}
 
-build_examples_01:
-  <<: *build_examples_template
+    # enable pedantic flags for compilation
+    - export PEDANTIC_CFLAGS="-Werror -Werror=deprecated-declarations -Werror=unused-variable -Werror=unused-but-set-variable -Werror=unused-function"
+    - export EXTRA_CFLAGS=${PEDANTIC_CFLAGS} && export EXTRA_CXXFLAGS=${EXTRA_CFLAGS}
 
-build_examples_02:
-  <<: *build_examples_template
+    - ${ADF_PATH}/tools/ci/build_examples.sh
+    # Check if the tests demand Make built binaries. If not, delete them
+    - if [ "$EXAMPLE_TEST_BUILD_SYSTEM" == "make" ]; then exit 0; fi
+    - cd ..
+    - rm -rf build_examples
 
-build_examples_03:
-  <<: *build_examples_template
+# same as above, but for CMake
+.build_examples_cmake: &build_examples_cmake
+  extends: .build_template
+  parallel: 8
+  artifacts:
+    when: always
+    paths:
+      - build_examples/list.json
+      - build_examples/list_job_*.json
+      - build_examples/*/*/*/sdkconfig
+      - build_examples/*/*/*/build/*.bin
+      - build_examples/*/*/*/build/*.elf
+      - build_examples/*/*/*/build/*.map
+      - build_examples/*/*/*/build/flasher_args.json
+      - build_examples/*/*/*/build/bootloader/*.bin
+      - build_examples/*/*/*/build/partition_table/*.bin
+      - $LOG_PATH
+    expire_in: 4 days
+  variables:
+    LOG_PATH: "$CI_PROJECT_DIR/log_examples"
+    BUILD_PATH: "$CI_PROJECT_DIR/build_examples"
+  only:
+    variables:
+      - $BOT_TRIGGER_WITH_LABEL == null
+      - $BOT_LABEL_BUILD
+      - $BOT_LABEL_EXAMPLE_TEST
+      - $BOT_LABEL_REGULAR_TEST
+      - $BOT_LABEL_WEEKEND_TEST
+  script:
+    # it's not possible to build 100% out-of-tree and have the "artifacts"
+    # mechanism work, but this is the next best thing
+    - mkdir -p ${BUILD_PATH}
+    - mkdir -p ${LOG_PATH}
+    - echo "The IDF branch is "${IDF_VERSION}
+    - $ADF_PATH/tools/ci/set_idf.sh ${IDF_VERSION}
+    - *setup_tools_unless_target_test
+    - export PEDANTIC_CFLAGS="-Werror -Wno-implicit-fallthrough"
+    - export EXTRA_CFLAGS=${PEDANTIC_CFLAGS} && export EXTRA_CXXFLAGS=${EXTRA_CFLAGS}
+    - ${ADF_PATH}/tools/ci/build_examples_cmake.sh
+    # Check if the tests demand CMake built binaries. If not, delete them
+    - if [ "$EXAMPLE_TEST_BUILD_SYSTEM" == "cmake" ]; then exit 0; fi
+    - cd ..
+    - rm -rf build_examples
+
+build_examples_v40_cmake:
+  extends: .build_examples_cmake
+  variables:
+    IDF_TARGET: esp32
+    IDF_VERSION: release/v4.0
+
+build_examples_v41_cmake:
+  extends: .build_examples_cmake
+  variables:
+    IDF_TARGET: esp32
+    IDF_VERSION: release/v4.1
+
+build_examples_v42_cmake:
+  extends: .build_examples_cmake
+  variables:
+    IDF_TARGET: esp32
+    IDF_VERSION: release/v4.2
+
+.build_examples_cmake_s2:
+  extends: .build_examples_cmake
+  variables:
+    IDF_TARGET: esp32s2beta
+    IDF_VERSION: release/v4.1
+
+build_examples_v33_make:
+  <<: *build_examples_make
 
 build_adf_test:
   <<: *build_template
@@ -155,6 +275,7 @@ build_docs:
     - make gh-linkcheck
     - make html
     - ../check_doc_warnings.sh
+
 assign_test:
   tags:
     - assign_test
@@ -164,7 +285,8 @@ assign_test:
   # we have a lot build example jobs. now we don't use dependencies, just download all artificats of build stage.
   dependencies:
     - build_adf_test
-    - build_examples_00
+    - build_examples_v33_make
+    - build_examples_v40_cmake
   variables:
     TEST_FW_PATH: "$CI_PROJECT_DIR/general_test_framework"
     EXAMPLE_CONFIG_OUTPUT_PATH: "$CI_PROJECT_DIR/examples/test_configs"
@@ -187,7 +309,8 @@ assign_test:
   when: on_success
   dependencies:
     - assign_test
-    - build_examples_00
+    - build_examples_v33_make
+    - build_examples_v40_cmake
     - build_adf_test
   artifacts:
     when: always
@@ -235,4 +358,3 @@ push_to_github:
     - git remote remove github &>/dev/null || true
     - git remote add github git@github.com:espressif/esp-adf.git
     - tools/ci/push_to_github.sh
-
